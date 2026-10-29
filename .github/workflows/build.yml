@@ -69,12 +69,15 @@ jobs:
         run: |
           cd immich/mobile
           flutter pub get
+          echo "=== background_downloader 实际版本 ==="
+          grep -A1 'background_downloader' pubspec.lock | head -4 || true
+          ls -d "$HOME"/.pub-cache/hosted/*/background_downloader-* 2>/dev/null || true
 
       - name: Re-apply pub-cache patches
         run: |
           # background_downloader 在 pub get 后才落到 pub-cache，
           # 所以这一步必须放在 pub get 之后
-          bash patches/00-kotlin-serialization-fix.sh || true
+          bash patches/00-kotlin-serialization-fix.sh
 
       - name: Build APK
         run: |
