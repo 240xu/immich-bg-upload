@@ -121,7 +121,7 @@ else:
       putBoolean(SHARED_PREF_REQUIRE_CHARGING_KEY, settings.requiresCharging)""",
         """      putLong(SHARED_PREF_MIN_DELAY_KEY, settings.minimumDelaySeconds)
       putBoolean(SHARED_PREF_REQUIRE_CHARGING_KEY, settings.requiresCharging)
-      putLong(SHARED_PREF_MAX_MINUTES_KEY, settings.maxUploadMinutes.toLong())""",
+      putLong(SHARED_PREF_MAX_MINUTES_KEY, settings.maxUploadMinutes)""",
         1)
 
     # getSettings: 一并读出
@@ -138,7 +138,7 @@ else:
       maxUploadMinutes = sp.getLong(
         SHARED_PREF_MAX_MINUTES_KEY,
         DEFAULT_MAX_UPLOAD_MINUTES.toLong()
-      ).toInt(),
+      ),
     )""",
         1)
 
@@ -146,8 +146,8 @@ else:
     if 'fun getMaxUploadMinutes' not in s:
         s = s.replace(
             "  fun setLocked(paused: Boolean) {",
-            """  fun getMaxUploadMinutes(): Int =
-    sp.getLong(SHARED_PREF_MAX_MINUTES_KEY, DEFAULT_MAX_UPLOAD_MINUTES.toLong()).toInt()
+            """  fun getMaxUploadMinutes(): Long =
+    sp.getLong(SHARED_PREF_MAX_MINUTES_KEY, DEFAULT_MAX_UPLOAD_MINUTES.toLong())
 
   fun setLocked(paused: Boolean) {""",
             1)
