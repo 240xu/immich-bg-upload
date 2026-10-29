@@ -21,6 +21,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout build repo
@@ -126,3 +128,19 @@ jobs:
           name: immich-apk-${{ env.IMMICH_VERSION }}
           path: out/
           retention-days: 30
+
+      # 同时发布到 Release，便于用镜像站加速下载
+      # （Actions artifact 需要 token 认证，无法走镜像）
+      - name: Publish to Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          TAG="build-$(date +%Y%m%d-%H%M%S)"
+          NOTES="Immich ${IMMICH_VERSION} + background-upload patches"
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --notes "$NOTES" \
+            out/*.apk out/SHA256SUMS || true
+          echo "发布完成: $TAG"
