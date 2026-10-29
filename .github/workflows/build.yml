@@ -61,20 +61,20 @@ jobs:
           set -e
           cd immich
           npm install -g @openapitools/openapi-generator-cli
-          npx --yes @openapitools/openapi-generator-cli version 7.25.0
+          # 版本由 open-api/openapitools.json 自动决定（7.25.0），不要显式传参
           cd open-api
-          bash ./bin/generate-dart-sdk.sh || {
-            echo "官方脚本失败，尝试直接用 CLI"
-            npx --yes @openapitools/openapi-generator-cli generate \
-              -g dart -i ./immich-openapi-specs.json \
-              -o ../mobile/generated/openapi \
-              --additional-properties=useOptional=true
-          }
+          bash ./bin/generate-dart-sdk.sh
 
       - name: pub get
         run: |
           cd immich/mobile
           flutter pub get
+
+      - name: Re-apply pub-cache patches
+        run: |
+          # background_downloader 在 pub get 后才落到 pub-cache，
+          # 所以这一步必须放在 pub get 之后
+          bash patches/00-kotlin-serialization-fix.sh || true
 
       - name: Build APK
         run: |
