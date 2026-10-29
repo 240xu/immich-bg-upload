@@ -1,0 +1,96 @@
+name: Build Immich APK (background upload patch)
+
+on:
+  workflow_dispatch:
+    inputs:
+      immich_version:
+        description: 'Immich version tag (e.g. v3.3.5)'
+        required: true
+        default: 'v3.3.5'
+  push:
+    branches: [main]
+    paths:
+      - 'patches/**'
+      - '.github/workflows/**'
+
+env:
+  IMMICH_VERSION: ${{ github.event.inputs.immich_version || 'v3.3.5' }}
+  FLUTTER_VERSION: '3.47.2'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout build repo
+        uses: actions/checkout@v4
+
+      - name: Checkout Immich source
+        run: |
+          git clone --depth 1 --branch "$IMMICH_VERSION" \
+            https://github.com/immich-app/immich.git immich
+          echo "Immich $IMMICH_VERSION ready"
+          du -sh immich
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Apply patches
+        run: |
+          set -e
+          chmod +x patches/*.sh || true
+          for f in patches/*.sh; do
+            [ -f "$f" ] || continue
+            echo "=== applying $f ==="
+            bash "$f"
+          done
+
+      - name: Generate OpenAPI Dart SDK
+        run: |
+          set -e
+          cd immich
+          npm install -g @openapitools/openapi-generator-cli
+          npx --yes @openapitools/openapi-generator-cli version 7.25.0
+          cd open-api
+          bash ./bin/generate-dart-sdk.sh || {
+            echo "官方脚本失败，尝试直接用 CLI"
+            npx --yes @openapitools/openapi-generator-cli generate \
+              -g dart -i ./immich-openapi-specs.json \
+              -o ../mobile/generated/openapi \
+              --additional-properties=useOptional=true
+          }
+
+      - name: pub get
+        run: |
+          cd immich/mobile
+          flutter pub get
+
+      - name: Build APK
+        run: |
+          cd immich/mobile
+          flutter build apk --release --target-platform android-arm64
+
+      - name: Collect APK
+        run: |
+          mkdir -p out
+          cp immich/mobile/build/app/outputs/flutter-apk/*.apk out/ || true
+          ls -lh out/
+          sha256sum out/*.apk > out/SHA256SUMS || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: immich-apk-${{ env.IMMICH_VERSION }}
+          path: out/
+          retention-days: 30
