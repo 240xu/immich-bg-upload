@@ -24,8 +24,9 @@ WORKER_DART="immich/mobile/lib/domain/services/background_worker.service.dart"
 SETTINGS_UI="immich/mobile/lib/widgets/settings/backup_settings/backup_settings.dart"
 BACKUP_CFG="immich/mobile/lib/domain/models/config/backup_config.dart"
 SETTINGS_KEY="immich/mobile/lib/domain/models/settings_key.dart"
+APP_CONFIG="immich/mobile/lib/domain/models/config/app_config.dart"
 
-for f in "$PIGEON" "$PREFS" "$WORKER_KT" "$WORKER_DART" "$SETTINGS_UI" "$BACKUP_CFG" "$SETTINGS_KEY"; do
+for f in "$PIGEON" "$PREFS" "$WORKER_KT" "$WORKER_DART" "$SETTINGS_UI" "$BACKUP_CFG" "$SETTINGS_KEY" "$APP_CONFIG"; do
   [ -f "$f" ] || { echo "ERROR: 找不到 $f" >&2; exit 1; }
 done
 
@@ -61,7 +62,8 @@ else:
     p.write_text(s.replace(old, new, 1)); print("  ok")
 PY
 
-echo "=== 1. pigeon: BackgroundWorkerSettings 加 maxUploadMinutes ==="python3 - "$PIGEON" << 'PY'
+echo "=== 1. pigeon: BackgroundWorkerSettings 加 maxUploadMinutes ==="
+python3 - "$PIGEON" << 'PY'
 import sys, pathlib
 p = pathlib.Path(sys.argv[1]); s = p.read_text()
 old = """class BackgroundWorkerSettings {
@@ -153,6 +155,37 @@ else:
     p.write_text(s); print("  ok")
 PY
 
+echo "=== 2b. app_config.dart: read/write 两个 switch 补 backupMaxUploadMinutes 分支 ==="
+python3 - "$APP_CONFIG" << 'PY'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1]); s = p.read_text()
+if 'backupMaxUploadMinutes' in s:
+    print("  skip: 已有")
+else:
+    # read(): .backupTriggerDelay => backup.triggerDelay,
+    old_read = "            .backupTriggerDelay => backup.triggerDelay,"
+    new_read = ("            .backupTriggerDelay => backup.triggerDelay,\n"
+                "            .backupMaxUploadMinutes => backup.maxUploadMinutes,")
+    # write(): .backupTriggerDelay => copyWith(backup: backup.copyWith(triggerDelay: value as int)),
+    old_write = "      .backupTriggerDelay => copyWith(backup: backup.copyWith(triggerDelay: value as int)),"
+    new_write = ("      .backupTriggerDelay => copyWith(backup: backup.copyWith(triggerDelay: value as int)),\n"
+                 "      .backupMaxUploadMinutes => copyWith(backup: backup.copyWith(maxUploadMinutes: value as int)),")
+
+    ok = True
+    if old_read in s:
+        s = s.replace(old_read, new_read, 1)
+    else:
+        print("ERROR: read() switch 未匹配", file=sys.stderr); ok = False
+    if old_write in s:
+        s = s.replace(old_write, new_write, 1)
+    else:
+        print("ERROR: write() switch 未匹配", file=sys.stderr); ok = False
+    if ok:
+        p.write_text(s); print("  ok")
+    else:
+        sys.exit(1)
+PY
+
 echo "=== 3. Kotlin Worker: 用配置值替代写死的 20 ==="
 python3 - "$WORKER_KT" << 'PY'
 import sys, pathlib
@@ -201,7 +234,8 @@ else:
     p.write_text(s.replace(old, new, 1)); print("  ok")
 PY
 
-echo "=== 4. Dart: onAndroidUpload 使用传进来的预算 ==="python3 - "$WORKER_DART" << 'PY'
+echo "=== 4. Dart: onAndroidUpload 使用传进来的预算 ==="
+python3 - "$WORKER_DART" << 'PY'
 import sys, pathlib, re
 p = pathlib.Path(sys.argv[1]); s = p.read_text()
 
