@@ -79,6 +79,35 @@ jobs:
           # 所以这一步必须放在 pub get 之后
           bash patches/00-kotlin-serialization-fix.sh
 
+      # 官方 CI 在编译前必跑 codegen（mise //mobile:codegen）：
+      # build_runner / drift / pigeon / i18n。缺任何一项都会编译失败，
+      # 报 StaticTranslations、BackgroundWorkerLockApi、context.t 等未定义。
+      - name: Codegen — pigeon (platform channels)
+        run: |
+          cd immich/mobile
+          ls pigeon/*.dart | xargs -n1 -P4 -I{} dart run pigeon --input {}
+          dart format lib/platform/
+
+      - name: Codegen — drift migrations
+        run: |
+          cd immich/mobile
+          dart run drift_dev make-migrations
+
+      - name: Codegen — i18n translations
+        run: |
+          # 对应官方 mise 任务 i18n:loader + i18n:keys
+          cd immich/mobile
+          dart run easy_localization:generate -S ../i18n
+          dart format lib/generated/codegen_loader.g.dart
+          dart run bin/generate_keys.dart
+          dart format lib/generated/translations.g.dart
+
+      - name: Codegen — build_runner
+        run: |
+          cd immich/mobile
+          dart run build_runner build --delete-conflicting-outputs
+          dart format lib/routing/router.gr.dart
+
       - name: Build APK
         run: |
           cd immich/mobile
