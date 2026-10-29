@@ -167,13 +167,8 @@ METHOD = '''  /// 入队备份候选，并阻塞直到后台队列清空（或�
         return !hadFailure;
       }
 
-      for (final task in active) {
-        final st = task.taskStatus;
-        if (st == TaskStatus.failed || st == TaskStatus.canceled) {
-          hadFailure = true;
-        }
-      }
-
+      // 注意：Task 对象本身不含状态字段（状态只在 TaskStatusUpdate 回调里），
+      // 这里只关心「队列是否还有活」，失败计数交由 _onUploadCallback 处理。
       await Future<void>.delayed(pollInterval);
     }
 
