@@ -129,6 +129,9 @@ jobs:
           ALIAS: immich-custom
           ANDROID_KEY_PASSWORD: immich123
           ANDROID_STORE_PASSWORD: immich123
+          # 触发官方内置的 PR 构建机制：包名加 .pr999 后缀，
+          # 可与官方 Immich 共存；桌面名称显示为 "Immich PR 999"。
+          PR_NUMBER: '999'
         run: |
           cd immich/mobile
           flutter build apk --release --target-platform android-arm64
