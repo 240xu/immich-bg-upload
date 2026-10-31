@@ -110,7 +110,25 @@ jobs:
           dart run build_runner build --delete-conflicting-outputs
           dart format lib/routing/router.gr.dart
 
+      - name: Generate signing keystore
+        run: |
+          # release 构建若没有 key.jks 会回退到 debug 签名，
+          # 而 CI 环境连 debug keystore 都不存在 -> 产出未签名 APK（装不上）。
+          # 这里生成一个自签名 keystore 供 release 使用。
+          cd immich/mobile/android
+          keytool -genkeypair -v \
+            -keystore key.jks \
+            -alias immich-custom \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass immich123 -keypass immich123 \
+            -dname "CN=Immich Custom Build, OU=Personal, O=Personal, L=Unknown, ST=Unknown, C=CN"
+          ls -lh key.jks
+
       - name: Build APK
+        env:
+          ALIAS: immich-custom
+          ANDROID_KEY_PASSWORD: immich123
+          ANDROID_STORE_PASSWORD: immich123
         run: |
           cd immich/mobile
           flutter build apk --release --target-platform android-arm64
