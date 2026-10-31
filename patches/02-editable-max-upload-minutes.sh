@@ -246,17 +246,22 @@ if 'static const int androidBackgroundUploadMinutes' in s:
         "", s)
     s = re.sub(
         r"    final budgetMinutes =\n\s+maxMinutes != null && maxMinutes > androidBackgroundUploadMinutes\n\s+\? maxMinutes\n\s+: androidBackgroundUploadMinutes;\n\s+final backupTimeout = Duration\(minutes: budgetMinutes\);",
-        "    // 预算由设置页控制（经 pigeon 传到 Kotlin，再回传到这里）\n"
-        "    final backupTimeout = maxMinutes != null ? Duration(minutes: maxMinutes) : null;",
+        "    // 预算由设置页控制（经 pigeon 传到 Kotlin，再回传到这里）。\n"
+        "    // 给 maxMinutes=null 一个安全默认，避免无超时无限跑。\n"
+        "    const fallbackMinutes = 55;\n"
+        "    final backupTimeout = Duration(minutes: maxMinutes ?? fallbackMinutes);",
         s)
     p.write_text(s); print("  ok (改为跟随配置)")
 else:
     old = "    final backupTimeout = maxMinutes != null ? Duration(minutes: maxMinutes - 1) : null;"
-    new = "    // 预算由设置页控制（经 pigeon 传到 Kotlin，再回传到这里）\n    final backupTimeout = maxMinutes != null ? Duration(minutes: maxMinutes) : null;"
+    new = ("    // 预算由设置页控制（经 pigeon 传到 Kotlin，再回传到这里）。\n"
+           "    // 给 maxMinutes=null 一个安全默认，避免无超时无限跑。\n"
+           "    const fallbackMinutes = 55;\n"
+           "    final backupTimeout = Duration(minutes: maxMinutes ?? fallbackMinutes);")
     if old in s:
-        p.write_text(s.replace(old, new, 1)); print("  ok")
+        p.write_text(s.replace(old, new, 1)); print("  ok (fallback 55)")
     else:
-        print("  note: 预算行未匹配，跳过（可能已被 01 改写）")
+        print("ERROR: 预算行未匹配", file=sys.stderr); sys.exit(1)
 PY
 
 echo "=== 5. Dart 设置页: 新增「后台上传最大运行时间」滑块 ==="

@@ -74,7 +74,15 @@ else:
       if (backupNotifier.isForegroundBackupRunning) {
         // 确保 background engine 锁已释放，否则后台 worker 启动时会被 skip
         // （BackgroundWorker.startWork: isLocked && connectEngines>0 -> skip）
-        await _ref.read(backgroundWorkerLockServiceProvider).unlock();
+        // 用超时保护：切后台有时限，不能因平台通道慢而阻塞
+        try {
+          await _ref
+              .read(backgroundWorkerLockServiceProvider)
+              .unlock()
+              .timeout(const Duration(milliseconds: 1500));
+        } catch (e) {
+          _log.warning("unlock before handoff failed/timed out: $e");
+        }
         final currentUser = _ref.read(currentUserProvider);
         if (currentUser != null) {
           _log.info("Handing off foreground backup to background service");

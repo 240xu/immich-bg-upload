@@ -89,31 +89,7 @@ if "services/background_upload.service.dart" not in s:
 #    Android 侧 Kotlin 传的是 20，这里减 1 作为安全余量。
 #    直接把下限放宽，让单个大文件有机会传完。
 # ═══════════════════════════════════════════════════════
-OLD_BUDGET = """  @override
-  Future<bool> onAndroidUpload(int? maxMinutes) async {
-    final hashTimeout = Duration(minutes: _isBackupEnabled ? 3 : 6);
-    final backupTimeout = maxMinutes != null ? Duration(minutes: maxMinutes - 1) : null;"""
-
-NEW_BUDGET = """  // 单轮后台上传的时间预算（分钟）。
-  // 官方原值来自 Kotlin 侧硬编码的 20 分钟，对单个大视频偏紧：
-  // 传不完会被 cancel，下一轮从头再来。这里放宽到 55 分钟。
-  // 注意：真正决定 WorkManager 何时掐的是系统策略，
-  // 这个值只控制 Flutter 侧主动取消的时机。
-  static const int androidBackgroundUploadMinutes = 55;
-
-  @override
-  Future<bool> onAndroidUpload(int? maxMinutes) async {
-    final hashTimeout = Duration(minutes: _isBackupEnabled ? 3 : 6);
-    final budgetMinutes =
-        maxMinutes != null && maxMinutes > androidBackgroundUploadMinutes
-            ? maxMinutes
-            : androidBackgroundUploadMinutes;
-    final backupTimeout = Duration(minutes: budgetMinutes);"""
-
-if OLD_BUDGET not in s:
-    print("ERROR: 找不到 onAndroidUpload 原文", file=sys.stderr)
-    sys.exit(1)
-s = s.replace(OLD_BUDGET, NEW_BUDGET, 1)
+# 注：单轮时间预算不在此处理——由 02 补丁从设置页配置下发（Kotlin 默认 55 分钟）。
 
 # ═══════════════════════════════════════════════════════
 # C2. 前台服务阈值 256MB -> 10MB
