@@ -4,21 +4,69 @@ on:
   workflow_dispatch:
     inputs:
       immich_version:
-        description: 'Immich version tag (e.g. v3.3.5)'
-        required: true
-        default: 'v3.3.5'
+        description: 'Immich version tag (留空=自动取最新 stable)'
+        required: false
+        default: ''
   push:
     branches: [main]
     paths:
       - 'patches/**'
       - '.github/workflows/**'
+  # 每 6 小时检查一次上游是否有新版本，有则自动构建
+  schedule:
+    - cron: '17 */6 * * *'
 
 env:
-  IMMICH_VERSION: ${{ github.event.inputs.immich_version || 'v3.3.5' }}
   FLUTTER_VERSION: '3.47.2'
 
 jobs:
+  # ---------------------------------------------------------------- 解析版本
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+      should_build: ${{ steps.pick.outputs.should_build }}
+    steps:
+      - name: Checkout build repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve Immich version
+        id: pick
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ github.event.inputs.immich_version }}
+        run: |
+          set -e
+          # 手动指定的版本优先
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            V="$INPUT_VERSION"
+            echo "手动指定版本: $V"
+            echo "version=$V" >> "$GITHUB_OUTPUT"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 自动取最新 stable（排除 prerelease）
+          V=$(gh release list --repo immich-app/immich --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName')
+          echo "上游最新 stable: $V"
+
+          # 已构建过就跳过（用 marker 文件记录）
+          if [ -f ".built-versions/$V" ]; then
+            echo "版本 $V 已构建过，跳过"
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "version=$V" >> "$GITHUB_OUTPUT"
+          else
+            echo "版本 $V 是新版本，开始构建"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "version=$V" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------- 构建
   build:
+    needs: resolve
+    if: needs.resolve.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -29,11 +77,14 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Checkout Immich source
+        env:
+          IMMICH_VERSION: ${{ needs.resolve.outputs.version }}
         run: |
+          set -e
+          echo "Building Immich $IMMICH_VERSION"
           git clone --depth 1 --branch "$IMMICH_VERSION" \
             https://github.com/immich-app/immich.git immich
-          echo "Immich $IMMICH_VERSION ready"
-          du -sh immich
+          cd immich && git log -1 --oneline
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -69,35 +120,31 @@ jobs:
 
       - name: pub get
         run: |
+          set -e
           cd immich/mobile
           flutter pub get
-          echo "=== background_downloader 实际版本 ==="
-          grep -A1 'background_downloader' pubspec.lock | head -4 || true
-          ls -d "$HOME"/.pub-cache/hosted/*/background_downloader-* 2>/dev/null || true
 
       - name: Re-apply pub-cache patches
         run: |
-          # background_downloader 在 pub get 后才落到 pub-cache，
-          # 所以这一步必须放在 pub get 之后
+          set -e
           bash patches/00-kotlin-serialization-fix.sh
 
-      # 官方 CI 在编译前必跑 codegen（mise //mobile:codegen）：
-      # build_runner / drift / pigeon / i18n。缺任何一项都会编译失败，
-      # 报 StaticTranslations、BackgroundWorkerLockApi、context.t 等未定义。
       - name: Codegen — pigeon (platform channels)
         run: |
+          set -e
           cd immich/mobile
           ls pigeon/*.dart | xargs -n1 -P4 -I{} dart run pigeon --input {}
           dart format lib/platform/
 
       - name: Codegen — drift migrations
         run: |
+          set -e
           cd immich/mobile
           dart run drift_dev make-migrations
 
       - name: Codegen — i18n translations
         run: |
-          # 对应官方 mise 任务 i18n:loader + i18n:keys
+          set -e
           cd immich/mobile
           dart run easy_localization:generate -S ../i18n
           dart format lib/generated/codegen_loader.g.dart
@@ -106,62 +153,114 @@ jobs:
 
       - name: Codegen — build_runner
         run: |
+          set -e
           cd immich/mobile
           dart run build_runner build --delete-conflicting-outputs
           dart format lib/routing/router.gr.dart
 
-      - name: Generate signing keystore
+      # 关键：用固定的 keystore（存 GitHub Secret），保证每次签名一致，
+      # 新 APK 能覆盖安装旧版 —— 这是"自动更新"能成立的前提。
+      - name: Restore signing keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.IMMICH_KEYSTORE_B64 }}
+          STORE_PASS: ${{ secrets.IMMICH_KEYSTORE_PASS }}
+          KEY_ALIAS: ${{ secrets.IMMICH_KEY_ALIAS }}
         run: |
-          # release 构建若没有 key.jks 会回退到 debug 签名，
-          # 而 CI 环境连 debug keystore 都不存在 -> 产出未签名 APK（装不上）。
-          # 这里生成一个自签名 keystore 供 release 使用。
+          set -e
+          if [ -z "${KEYSTORE_B64:-}" ]; then
+            echo "::error::缺少 secret IMMICH_KEYSTORE_B64"
+            exit 1
+          fi
           cd immich/mobile/android
-          keytool -genkeypair -v \
-            -keystore key.jks \
-            -alias immich-custom \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass immich123 -keypass immich123 \
-            -dname "CN=Immich Custom Build, OU=Personal, O=Personal, L=Unknown, ST=Unknown, C=CN"
+          echo "$KEYSTORE_B64" | base64 -d > key.jks
+          chmod 600 key.jks
           ls -lh key.jks
+          keytool -list -keystore key.jks -storepass "$STORE_PASS" -alias "$KEY_ALIAS" \
+            | grep -E "Alias|Entry type" || true
 
       - name: Build APK
         env:
-          ALIAS: immich-custom
-          ANDROID_KEY_PASSWORD: immich123
-          ANDROID_STORE_PASSWORD: immich123
+          ALIAS: ${{ secrets.IMMICH_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.IMMICH_KEYSTORE_PASS }}
+          ANDROID_STORE_PASSWORD: ${{ secrets.IMMICH_KEYSTORE_PASS }}
           # 触发官方内置的 PR 构建机制：包名加 .pr999 后缀，
           # 可与官方 Immich 共存；桌面名称显示为 "Immich PR 999"。
           PR_NUMBER: '999'
         run: |
+          set -e
           cd immich/mobile
           flutter build apk --release --target-platform android-arm64
 
+      - name: Verify signature and package
+        run: |
+          set -e
+          APK=$(ls immich/mobile/build/app/outputs/flutter-apk/*.apk | head -1)
+          echo "APK: $APK"
+          ls -lh "$APK"
+          # 校验签名块存在
+          if command -v apksigner >/dev/null 2>&1; then
+            apksigner verify --print-certs "$APK" | head -10
+          else
+            echo "apksigner 不在 PATH，跳过（Build 步骤已用 release 签名）"
+          fi
+          # 校验包名
+          if command -v aapt >/dev/null 2>&1; then
+            aapt dump badging "$APK" | grep -E "^package:" || true
+          fi
+
       - name: Collect APK
         run: |
+          set -e
           mkdir -p out
-          cp immich/mobile/build/app/outputs/flutter-apk/*.apk out/ || true
-          ls -lh out/
-          sha256sum out/*.apk > out/SHA256SUMS || true
+          cp immich/mobile/build/app/outputs/flutter-apk/*.apk out/
+          cd out
+          for f in *.apk; do mv "$f" "immich-pr999-${IMMICH_VERSION}.apk"; done
+          ls -lh
+          sha256sum *.apk > SHA256SUMS
+          cat SHA256SUMS
+        env:
+          IMMICH_VERSION: ${{ needs.resolve.outputs.version }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: immich-apk-${{ env.IMMICH_VERSION }}
+          name: immich-apk-${{ needs.resolve.outputs.version }}
           path: out/
-          retention-days: 30
+          retention-days: 90
 
-      # 同时发布到 Release，便于用镜像站加速下载
-      # （Actions artifact 需要 token 认证，无法走镜像）
+      # 发布到 Release，便于用镜像站加速下载
       - name: Publish to Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMMICH_VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           set -e
-          TAG="build-$(date +%Y%m%d-%H%M%S)"
-          NOTES="Immich ${IMMICH_VERSION} + background-upload patches"
-          gh release create "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$TAG" \
-            --notes "$NOTES" \
-            out/*.apk out/SHA256SUMS || true
+          TAG="v${IMMICH_VERSION}-pr999"
+          NOTES="Immich ${IMMICH_VERSION} + background-upload patches (PR999)"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，上传覆盖"
+            gh release upload "$TAG" out/*.apk out/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Immich ${IMMICH_VERSION} (PR999)" \
+              --notes "$NOTES" \
+              out/*.apk out/SHA256SUMS
+          fi
           echo "发布完成: $TAG"
+
+      # 记录已构建版本，避免定时任务重复构建
+      - name: Mark version as built
+        if: success()
+        env:
+          IMMICH_VERSION: ${{ needs.resolve.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          mkdir -p .built-versions
+          echo "built at $(date -u +%Y-%m-%dT%H:%M:%SZ)" > ".built-versions/${IMMICH_VERSION}"
+          git add ".built-versions/${IMMICH_VERSION}"
+          git commit -m "chore: mark ${IMMICH_VERSION} as built [skip ci]" || echo "无变化"
+          git push || echo "push 失败（可忽略）"
