@@ -2,3 +2,4 @@ out/
 immich/
 node_modules/
 runs.json
+original.yml
