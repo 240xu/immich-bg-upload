@@ -198,14 +198,18 @@ jobs:
           echo "APK: $APK"
           ls -lh "$APK"
           # 校验签名块存在
-          if command -v apksigner >/dev/null 2>&1; then
-            apksigner verify --print-certs "$APK" | head -10
+          # 找到 build-tools 里的 apksigner（Flutter/Android SDK 自带）
+          APKSIGNER=$(find "$ANDROID_HOME" -name apksigner -type f 2>/dev/null | sort -V | tail -1)
+          if [ -n "$APKSIGNER" ]; then
+            echo "apksigner: $APKSIGNER"
+            "$APKSIGNER" verify --print-certs "$APK" | head -12
           else
-            echo "apksigner 不在 PATH，跳过（Build 步骤已用 release 签名）"
+            echo "::warning::apksigner 未找到，签名未独立验证"
           fi
           # 校验包名
-          if command -v aapt >/dev/null 2>&1; then
-            aapt dump badging "$APK" | grep -E "^package:" || true
+          AAPT=$(find "$ANDROID_HOME" -name aapt -type f 2>/dev/null | sort -V | tail -1)
+          if [ -n "$AAPT" ]; then
+            "$AAPT" dump badging "$APK" | grep -E "^package:" || true
           fi
 
       - name: Collect APK
@@ -235,7 +239,11 @@ jobs:
           IMMICH_VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           set -e
-          TAG="v${IMMICH_VERSION}-pr999"
+          # IMMICH_VERSION 已带 v 前缀（如 v3.3.5），不要重复加
+          case "$IMMICH_VERSION" in
+            v*) TAG="${IMMICH_VERSION}-pr999" ;;
+            *)  TAG="v${IMMICH_VERSION}-pr999" ;;
+          esac
           NOTES="Immich ${IMMICH_VERSION} + background-upload patches (PR999)"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $TAG 已存在，上传覆盖"
