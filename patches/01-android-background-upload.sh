@@ -65,7 +65,7 @@ NEW = """      // Android 也走 BackgroundUploadService：底层 background_dow
       }
       final ok = await bgUpload.uploadBackupCandidatesAndWait(
         currentUser.id,
-        cancelToken: _cancellationToken,
+        cancellationToken: _cancellationToken,
       );
       _logger.info("Background backup finished, allSuccess=$ok");
       // 有失败则让 WorkManager 重试
@@ -122,7 +122,7 @@ METHOD = '''  /// 入队备份候选，并阻塞直到后台队列清空（或�
   /// 返回 true 表示全部成功。
   Future<bool> uploadBackupCandidatesAndWait(
     String userId, {
-    Completer<void>? cancelToken,
+    Completer<void>? cancellationToken,
     Duration timeout = const Duration(minutes: 55),
     Duration pollInterval = const Duration(seconds: 2),
   }) async {
@@ -132,7 +132,7 @@ METHOD = '''  /// 入队备份候选，并阻塞直到后台队列清空（或�
     var hadFailure = false;
 
     while (DateTime.now().isBefore(deadline)) {
-      if (cancelToken?.isCompleted ?? false) {
+      if (cancellationToken?.isCompleted ?? false) {
         _logger.info("background upload cancelled by caller");
         break;
       }
