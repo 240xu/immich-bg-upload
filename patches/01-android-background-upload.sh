@@ -63,13 +63,13 @@ NEW = """      // Android 也走 BackgroundUploadService：底层 background_dow
         _logger.warning("backgroundUploadService unavailable, skipping backup");
         return false;
       }
-      final ok = await bgUpload.uploadBackupCandidatesAndWait(
+      final allSucceeded = await bgUpload.uploadBackupCandidatesAndWait(
         currentUser.id,
         cancellationToken: _cancellationToken,
       );
-      _logger.info("Background backup finished, allSuccess=$ok");
-      // 有失败则让 WorkManager 重试
-      return !ok;"""
+      _logger.info("Background backup finished, all uploads succeeded: $allSucceeded");
+      // Retry when at least one upload failed
+      return !allSucceeded;"""
 
 if OLD not in s:
     print("ERROR: 找不到 _handleBackup 的 Android 分支原文", file=sys.stderr)

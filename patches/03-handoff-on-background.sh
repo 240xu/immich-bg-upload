@@ -85,13 +85,13 @@ else:
         }
         final currentUser = _ref.read(currentUserProvider);
         if (currentUser != null) {
-          _log.info("Handing off foreground backup to background service");
+          _log.info("Handing the foreground backup over to the background service");
           unawaited(
             _ref
                 .read(backgroundUploadServiceProvider)
                 .uploadBackupCandidates(currentUser.id)
-                .catchError((Object e) {
-                  _log.warning("Background handoff failed: $e");
+                .onError((Object error, StackTrace stack) {
+                  _log.warning("Failed to hand over the foreground backup: $error");
                 }),
           );
         }
@@ -141,7 +141,7 @@ bk = pathlib.Path(sys.argv[2]).read_text()
 checks = [
     ("isForegroundBackupRunning 定义", "isForegroundBackupRunning => _cancelToken != null" in bk),
     ("交接调用", "uploadBackupCandidates(currentUser.id)" in lc),
-    ("handoff 日志", "Handing off foreground backup to background service" in lc),
+    ("handoff 日志", "Handing the foreground backup over to the background service" in lc),
     ("user provider import", "providers/user.provider.dart" in lc),
     ("background upload import", "services/background_upload.service.dart" in lc),
     ("保留了 disconnect", "websocketProvider.notifier).disconnect()" in lc),
