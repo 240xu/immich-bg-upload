@@ -214,21 +214,27 @@ else:
 PYEOF
 
 # ═══════════════════════════════════════════════════════
-# C. Dart: 探测优先走 Cronet
+# C. Dart: 把 Cronet 探测放到 NetworkRepository（本来就依赖 platform.provider）
 # ═══════════════════════════════════════════════════════
 python3 - << 'PYEOF'
 import pathlib
-p = pathlib.Path("immich/mobile/lib/services/api.service.dart")
-s = p.read_text()
 
-if "_cronetProbe" in s:
-    print("    api.service.dart: 已存在")
-else:
-    helper = '''  /// 用 Chromium Cronet 探测 URL 是否可达。
+nr = pathlib.Path("immich/mobile/lib/infrastructure/repositories/network.repository.dart")
+api = pathlib.Path("immich/mobile/lib/services/api.service.dart")
+
+# ── C1. NetworkRepository 加静态探测方法 ──
+s = nr.read_text()
+if "cronetProbe" not in s:
+    anchor = "  /// Returns a shared HTTP client that uses native SSL configuration."
+    assert anchor in s, "network.repository: 找不到插入锚点"
+    method = '''  /// 用 Chromium Cronet 探测 URL 是否可达（仅 Android）。
   ///
   /// 返回 true/false 表示 Cronet 给出了判定；返回 null 表示未判定
   /// （非 Android / Cronet 未就绪 / 调用异常），调用方应回退原有逻辑。
-  Future<bool?> _cronetProbe(String url) async {
+  ///
+  /// 背景：部分接入商按 ClientHello 特征过滤流量（缺后量子密钥交换直接 RST），
+  /// 系统 TLS 栈会被拦；Cronet 用 BoringSSL，带后量子密钥交换，可通过。
+  static Future<bool?> cronetProbe(String url) async {
     if (!Platform.isAndroid) return null;
     try {
       final code = await networkApi.cronetPing(url).timeout(const Duration(seconds: 8));
@@ -240,10 +246,15 @@ else:
   }
 
 '''
-    anchor = "  Future<String> _getWellKnownEndpoint(String baseUrl) async {"
-    assert anchor in s, "api: _getWellKnownEndpoint 未找到"
-    s = s.replace(anchor, helper + anchor, 1)
+    s = s.replace(anchor, method + anchor, 1)
+    nr.write_text(s)
+    print("    network.repository: +cronetProbe")
+else:
+    print("    network.repository: 已存在")
 
+# ── C2. api.service.dart 调用它 ──
+s = api.read_text()
+if "cronetProbe" not in s:
     old = """  Future<bool> _isEndpointAvailable(String serverUrl) async {
     final endpoint = serverUrl.endsWith('/api') ? serverUrl : '$serverUrl/api';
 """
@@ -251,16 +262,17 @@ else:
     final endpoint = serverUrl.endsWith('/api') ? serverUrl : '$serverUrl/api';
 
     // 优先用 Cronet 探测：可绕过按 ClientHello 特征过滤的接入商
-    final cronetResult = await _cronetProbe('$endpoint/server/ping');
+    final cronetResult = await NetworkRepository.cronetProbe('$endpoint/server/ping');
     if (cronetResult != null) {
       return cronetResult;
     }
 """
-    assert old in s, "api: _isEndpointAvailable 未找到"
+    assert old in s, "api.service: 找不到 _isEndpointAvailable"
     s = s.replace(old, new, 1)
-
-    p.write_text(s)
+    api.write_text(s)
     print("    api.service.dart: 已接入")
+else:
+    print("    api.service.dart: 已存在")
 PYEOF
 
 echo ""
@@ -268,6 +280,7 @@ echo "==> 校验"
 grep -q "cronetPing" immich/mobile/pigeon/network_api.dart && echo "  ✅ pigeon"
 grep -q "suspend fun cronetPing" immich/mobile/android/app/src/main/kotlin/app/alextran/immich/core/HttpClientManager.kt && echo "  ✅ HttpClientManager"
 grep -q "override fun cronetPing" immich/mobile/android/app/src/main/kotlin/app/alextran/immich/core/NetworkApiPlugin.kt && echo "  ✅ NetworkApiPlugin"
-grep -q "_cronetProbe" immich/mobile/lib/services/api.service.dart && echo "  ✅ api.service.dart"
+grep -q "cronetProbe" immich/mobile/lib/infrastructure/repositories/network.repository.dart && echo "  ✅ network.repository.dart"
+grep -q "NetworkRepository.cronetProbe" immich/mobile/lib/services/api.service.dart && echo "  ✅ api.service.dart"
 echo ""
 echo "==> 07 补丁完成"
