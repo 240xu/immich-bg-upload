@@ -58,7 +58,7 @@ if "cronet_http" not in s:
         if line.startswith("  ") and not line.startswith("    ") and line.strip():
             insert_at = idx + len("\n".join(lines[:i])) + 1
             break
-    s = s[:insert_at] + "  cronet_http: ^1.10.1\n" + s[insert_at:]
+    s = s[:insert_at] + "  cronet_http: ^1.8.0\n" + s[insert_at:]
     p.write_text(s)
     print("    pubspec: +cronet_http ^1.10.1")
 else:
