@@ -161,23 +161,83 @@ else:
 
 /// 在每次请求上注入 Immich 鉴权 header 的 [http.Client] 包装。
 ///
-/// Cronet 不共享 OkHttp 的 CookieJar 与拦截器，因此需要在 Dart 侧
-/// 用 native 的 HttpClientManager.getAuthHeaders(url) 取出现成的请求头。
+/// 两件事：
+///  1. **请求**：调用 native 的 requestAuthHeaders(url) 取出现成的请求头
+///     （custom headers + 已存在的 Cookie + basic auth）。Cronet 不走
+///     OkHttp 的拦截器，所以这些头必须由 Dart 侧补。
+///  2. **响应**：Cronet 不接管 CookieJar，而 Immich 登录后靠
+///     `Set-Cookie: immich_access_token=...` 维持会话。因此这里自己
+///     保存 Set-Cookie，并回填给后续请求。
 class _CronetAuthClient extends http.BaseClient {
   _CronetAuthClient(this._inner);
 
   final http.Client _inner;
 
-  @override
-  Future<http.StreamedResponse> send(http.BaseRequest request) async {
-    final headers = await networkApi.requestAuthHeaders(request.url.toString());
-    if (headers.isNotEmpty) {
-      // 请求自带的头优先，native 头只补充缺的部分
-      for (final entry in headers.entries) {
-        request.headers.putIfAbsent(entry.key, () => entry.value);
+  /// host -> {cookieName: cookieValue}
+  final Map<String, Map<String, String>> _cookies = {};
+
+  String? _cookieHeader(String host) {
+    final jar = _cookies[host];
+    if (jar == null || jar.isEmpty) return null;
+    return jar.entries.map((e) => '${e.key}=${e.value}').join('; ');
+  }
+
+  void _storeCookies(String host, List<String> setCookieHeaders) {
+    // cronet_http 会把同名 header 用 "," 拼成一行，因此这里需要再拆开。
+    // 拆分点：逗号后面紧跟 "name=" 的形态（不是 Expires=...GMT, 那种）。
+    final raws = <String>[];
+    for (final line in setCookieHeaders) {
+      final parts = line.split(RegExp(r',\s*(?=[A-Za-z0-9!#$%&*+.^_`|~-]+=)'));
+      raws.addAll(parts);
+    }
+
+    for (final raw in raws) {
+      final semi = raw.indexOf(';');
+      final pair = (semi >= 0 ? raw.substring(0, semi) : raw).trim();
+      final eq = pair.indexOf('=');
+      if (eq <= 0) continue;
+      final name = pair.substring(0, eq).trim();
+      final value = pair.substring(eq + 1).trim();
+      if (name.isEmpty) continue;
+      final jar = _cookies.putIfAbsent(host, () => {});
+      if (value.isEmpty) {
+        jar.remove(name);
+      } else {
+        jar[name] = value;
       }
     }
-    return _inner.send(request);
+  }
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    final host = request.url.host;
+
+    // 1) native 侧的现成请求头（custom headers / basic auth）
+    final headers = await networkApi.requestAuthHeaders(request.url.toString());
+    headers.forEach((k, v) {
+      if (!request.headers.containsKey(k)) {
+        request.headers[k] = v;
+      }
+    });
+
+    // 2) 本客户端自己维护的 cookie（登录后由 Set-Cookie 填充）
+    final cookie = _cookieHeader(host);
+    if (cookie != null && !request.headers.containsKey('cookie')) {
+      request.headers['cookie'] = cookie;
+    }
+
+    final response = await _inner.send(request);
+
+    // 3) 收集 Set-Cookie
+    final setCookies = response.headers.entries
+        .where((e) => e.key.toLowerCase() == 'set-cookie')
+        .map((e) => e.value)
+        .toList();
+    if (setCookies.isNotEmpty) {
+      _storeCookies(host, setCookies);
+    }
+
+    return response;
   }
 
   @override
