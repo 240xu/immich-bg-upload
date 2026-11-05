@@ -190,17 +190,28 @@ else:
     s = s.replace(anchor, impl + anchor, 1)
 
     # 在类外声明协程作用域
+    # 注意：不能写 SupervisorJob() + Dispatchers.IO —— Kotlin 2.x 把 Job+Job 记为
+    # deprecation error，而本项目 Kotlin 开了 warnings-as-errors。
+    # 改用 CoroutineScope(SupervisorJob()).launch(Dispatchers.IO) 的形式。
     marker = "private class NetworkApiImpl("
     assert marker in s, "plugin: NetworkApiImpl 未找到"
     s = s.replace(
         marker,
-        "private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)\n\n" + marker,
+        "private val scope = CoroutineScope(SupervisorJob())\n\n" + marker,
         1,
     )
 
-    # 把 4 个 import 一次性插到现有 import 块末尾，避免散落在 package 行后面
+    # launch 时显式指定 Dispatchers.IO，避免依赖作用域默认调度器
+    s = s.replace(
+        "    scope.launch {\n      try {\n        callback(Result.success(HttpClientManager.cronetPing(url).toLong()))",
+        "    scope.launch(Dispatchers.IO) {\n      try {\n        callback(Result.success(HttpClientManager.cronetPing(url).toLong()))",
+        1,
+    )
+
+    # 把 import 一次性插到现有 import 块末尾
     missing = [i for i in [
         "import kotlinx.coroutines.CoroutineScope",
+        "import kotlinx.coroutines.Dispatchers",
         "import kotlinx.coroutines.SupervisorJob",
         "import kotlinx.coroutines.launch",
     ] if i not in s]
