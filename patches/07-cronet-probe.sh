@@ -72,55 +72,61 @@ else:
     impl = '''  /**
    * 用 Cronet 发起一次 GET，返回 HTTP 状态码；任何失败都返回 -1。
    *
-   * Cronet 引擎在 [init] 里异步创建，若尚未就绪则直接返回 -1，
+   * 用 CountDownLatch 做同步等待，避免依赖协程 API 的具体签名。
+   * Cronet 引擎在 [init] 里异步创建，未就绪时直接返回 -1，
    * 由 Dart 侧回退到原有 OkHttp 探测。
    */
-  suspend fun cronetPing(url: String): Int = withContext(Dispatchers.IO) {
-    val engine = cronetEngine ?: return@withContext -1
+  fun cronetPing(url: String): Int {
+    val engine = cronetEngine ?: return -1
+    val latch = java.util.concurrent.CountDownLatch(1)
+    val result = java.util.concurrent.atomic.AtomicInteger(-1)
     try {
-      suspendCancellableCoroutine { cont ->
-        val callback = object : UrlRequest.Callback() {
-          override fun onSucceeded(request: UrlRequest, info: UrlResponseInfo) {
-            if (cont.isActive) cont.resume(info.httpStatusCode)
-          }
-
-          override fun onFailed(request: UrlRequest, info: UrlResponseInfo?, error: CronetException) {
-            if (cont.isActive) cont.resume(-1)
-          }
-
-          override fun onCanceled(request: UrlRequest, info: UrlResponseInfo?) {
-            if (cont.isActive) cont.resume(-1)
-          }
-
-          override fun onRedirectReceived(
-            request: UrlRequest,
-            info: UrlResponseInfo,
-            newLocationUrl: String,
-          ) {
-            request.followRedirect()
-          }
-
-          // 拿到状态码即可结束，不必等 body
-          override fun onResponseStarted(request: UrlRequest, info: UrlResponseInfo) {
-            request.cancel()
-            if (cont.isActive) cont.resume(info.httpStatusCode)
-          }
-
-          override fun onReadCompleted(
-            request: UrlRequest,
-            info: UrlResponseInfo,
-            byteBuffer: java.nio.ByteBuffer,
-          ) {
-            request.read(java.nio.ByteBuffer.allocateDirect(4096))
-          }
+      val callback = object : UrlRequest.Callback() {
+        override fun onSucceeded(request: UrlRequest, info: UrlResponseInfo) {
+          result.set(info.httpStatusCode)
+          latch.countDown()
         }
-        val request = engine.newUrlRequestBuilder(url, callback, cronetExecutor).build()
-        cont.invokeOnCancellation { runCatching { request.cancel() } }
-        request.start()
+
+        override fun onFailed(request: UrlRequest, info: UrlResponseInfo?, error: CronetException) {
+          latch.countDown()
+        }
+
+        override fun onCanceled(request: UrlRequest, info: UrlResponseInfo?) {
+          latch.countDown()
+        }
+
+        override fun onRedirectReceived(
+          request: UrlRequest,
+          info: UrlResponseInfo,
+          newLocationUrl: String,
+        ) {
+          request.followRedirect()
+        }
+
+        // 拿到状态码即可结束，不必等 body
+        override fun onResponseStarted(request: UrlRequest, info: UrlResponseInfo) {
+          result.set(info.httpStatusCode)
+          request.cancel()
+          latch.countDown()
+        }
+
+        override fun onReadCompleted(
+          request: UrlRequest,
+          info: UrlResponseInfo,
+          byteBuffer: java.nio.ByteBuffer,
+        ) {
+          request.read(java.nio.ByteBuffer.allocateDirect(4096))
+        }
+      }
+      val request = engine.newUrlRequestBuilder(url, callback, cronetExecutor).build()
+      request.start()
+      if (!latch.await(8, java.util.concurrent.TimeUnit.SECONDS)) {
+        runCatching { request.cancel() }
       }
     } catch (e: Exception) {
-      -1
+      return -1
     }
+    return result.get()
   }
 
 '''
@@ -130,9 +136,6 @@ else:
 
     # 补齐 import：统一插到现有 import 块末尾
     needed = [
-        "import kotlinx.coroutines.Dispatchers",
-        "import kotlinx.coroutines.withContext",
-        "import kotlinx.coroutines.suspendCancellableCoroutine",
         "import org.chromium.net.CronetEngine",
         "import org.chromium.net.CronetException",
         "import org.chromium.net.UrlRequest",
@@ -198,7 +201,6 @@ else:
     # 把 4 个 import 一次性插到现有 import 块末尾，避免散落在 package 行后面
     missing = [i for i in [
         "import kotlinx.coroutines.CoroutineScope",
-        "import kotlinx.coroutines.Dispatchers",
         "import kotlinx.coroutines.SupervisorJob",
         "import kotlinx.coroutines.launch",
     ] if i not in s]
@@ -278,7 +280,7 @@ PYEOF
 echo ""
 echo "==> 校验"
 grep -q "cronetPing" immich/mobile/pigeon/network_api.dart && echo "  ✅ pigeon"
-grep -q "suspend fun cronetPing" immich/mobile/android/app/src/main/kotlin/app/alextran/immich/core/HttpClientManager.kt && echo "  ✅ HttpClientManager"
+grep -q "fun cronetPing" immich/mobile/android/app/src/main/kotlin/app/alextran/immich/core/HttpClientManager.kt && echo "  ✅ HttpClientManager"
 grep -q "override fun cronetPing" immich/mobile/android/app/src/main/kotlin/app/alextran/immich/core/NetworkApiPlugin.kt && echo "  ✅ NetworkApiPlugin"
 grep -q "cronetProbe" immich/mobile/lib/infrastructure/repositories/network.repository.dart && echo "  ✅ network.repository.dart"
 grep -q "NetworkRepository.cronetProbe" immich/mobile/lib/services/api.service.dart && echo "  ✅ api.service.dart"
