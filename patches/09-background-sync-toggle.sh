@@ -34,42 +34,74 @@ for f in "$SETTINGS_KEY" "$BACKUP_CFG" "$APP_CONFIG" "$SETTINGS_UI" "$WORKER"; d
 done
 
 # ═══════════════════════════════════════════════════════
-# A0. i18n key（必须先有 key，否则 context.t.xxx 编译不过）
-#     只需要加 en.json —— 其余 88 个语种由 easy_localization 自动 fallback
+# A0. i18n key
+#
+# ⚠️ 只加 en.json 是不够的！easy_localization 会按 locale 精确查表，
+#    找不到就直接显示 key 本身/回退英文 —— 中文界面下就会看到英文。
+#    所以每个要支持的语言都必须单独加。
+#
+#    这里加 4 个：en（英文）/ zh_Hans（简体）/ zh_Hant（繁体）/ ja（日文，可选）
+#    其余 85 个语种未翻译会自动 fallback 到 en（这是 easy_localization 的既有行为，
+#    官方也没翻全，可接受）。
 # ═══════════════════════════════════════════════════════
 python3 - << 'PYEOF'
 import json, pathlib, sys, collections
 
-p = pathlib.Path("immich/i18n/en.json")
-if not p.exists():
-    print("ERROR: 找不到 immich/i18n/en.json", file=sys.stderr); sys.exit(1)
+I18N = pathlib.Path("immich/i18n")
+if not I18N.is_dir():
+    print("ERROR: 找不到 immich/i18n", file=sys.stderr); sys.exit(1)
 
-raw = p.read_text()
-d = json.loads(raw, object_pairs_hook=collections.OrderedDict)
-
-NEW = {
-    "background_sync": "Background sync",
-    "background_sync_description": "Sync albums, people and memories while the app is in the background. Turn off to only upload photos in the background.",
+# key -> 各语言的译文（用词对齐官方既有风格：备份/同步/后台选项/充电中）
+TRANSLATIONS = {
+    "en": {
+        "background_sync": "Background sync",
+        "background_sync_description": "Sync albums, people and memories while the app is in the background. Turn off to only upload photos in the background.",
+    },
+    "zh_Hans": {
+        "background_sync": "后台同步",
+        "background_sync_description": "App 在后台时同步相册、人物和回忆。关闭后后台只上传照片，不更新元数据。",
+    },
+    "zh_Hant": {
+        "background_sync": "背景同步",
+        "background_sync_description": "App 在背景時同步相簿、人物和回憶。關閉後背景只上傳照片，不更新中繼資料。",
+    },
+    "ja": {
+        "background_sync": "バックグラウンド同期",
+        "background_sync_description": "アプリがバックグラウンドにある間、アルバム・人物・思い出を同期します。オフにすると写真のアップロードのみ行います。",
+    },
 }
 
-added = [k for k in NEW if k not in d]
-if not added:
-    print("    i18n: 已存在")
-else:
-    # 插在 background_options 之后，保持字母序附近
+touched = []
+for lang, NEW in TRANSLATIONS.items():
+    p = I18N / f"{lang}.json"
+    if not p.exists():
+        print(f"    i18n[{lang}]: 文件不存在，跳过")
+        continue
+
+    d = json.loads(p.read_text(), object_pairs_hook=collections.OrderedDict)
+    missing = [k for k in NEW if k not in d]
+    if not missing:
+        print(f"    i18n[{lang}]: 已存在")
+        continue
+
     out = collections.OrderedDict()
+    inserted = False
     for k, v in d.items():
         out[k] = v
-        if k == "background_options":
+        if k == "background_options" and not inserted:
             for nk in NEW:
                 if nk not in out:
                     out[nk] = NEW[nk]
-    # 若没找到锚点，直接追加到末尾
-    for nk in NEW:
-        if nk not in out:
-            out[nk] = NEW[nk]
+            inserted = True
+    if not inserted:
+        for nk in NEW:
+            if nk not in out:
+                out[nk] = NEW[nk]
+
     p.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n")
-    print(f"    i18n: +{','.join(NEW.keys())}")
+    touched.append(f"{lang}(+{len(missing)})")
+
+print(f"    i18n: {', '.join(touched) if touched else '无变化'}")
 PYEOF
 
 # ═══════════════════════════════════════════════════════
@@ -256,7 +288,13 @@ PYEOF
 
 echo ""
 echo "==> 校验"
-grep -q "background_sync" immich/i18n/en.json && echo "  ✅ i18n key"
+for L in en zh_Hans zh_Hant ja; do
+  if grep -q "background_sync" "immich/i18n/$L.json" 2>/dev/null; then
+    echo "  ✅ i18n[$L]"
+  else
+    echo "  ❌ i18n[$L] 缺 key"
+  fi
+done
 grep -q "backgroundSyncEnabled" immich/mobile/lib/domain/models/settings_key.dart && echo "  ✅ SettingsKey"
 grep -q "backgroundSyncEnabled" immich/mobile/lib/domain/models/config/backup_config.dart && echo "  ✅ BackupConfig"
 grep -q "backgroundSyncEnabled" immich/mobile/lib/domain/models/config/app_config.dart && echo "  ✅ AppConfig 映射"
