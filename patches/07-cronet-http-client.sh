@@ -250,12 +250,53 @@ class _CronetAuthClient extends http.BaseClient {
     print("    network.repository: Android → CronetClient + _CronetAuthClient")
 PYEOF
 
+# ═══════════════════════════════════════════════════════
+# F. ApiService.updateHeaders: 把 accessToken 传给 native cookieJar
+#
+# 这是「多 isolate」场景的关键：
+#   - 登录在 main isolate，token 存在 Store（drift DB，跨 isolate 可见）
+#   - remote-sync 跑在独立 isolate，它自己 new 出来的 ApiService
+#     没有 main isolate 内存里的 cookie
+#   - 但只要 native 侧 cookieJar 里有 token，任何 isolate 调
+#     requestAuthHeaders(url) 都能拿到 Cookie header
+#   - 而唯一能把 token 写进 native cookieJar 的入口是
+#     NetworkRepository.setHeaders(..., token: ...)
+# ═══════════════════════════════════════════════════════
+python3 - << 'PYEOF'
+import pathlib
+p = pathlib.Path("immich/mobile/lib/services/api.service.dart")
+s = p.read_text()
+
+if "setHeaders(getRequestHeaders(), getServerUrls(), token:" in s:
+    print("    api.service.dart: 已存在")
+else:
+    old = """  Future<void> updateHeaders() async {
+    await NetworkRepository.setHeaders(getRequestHeaders(), getServerUrls());
+    _apiClient.client = NetworkRepository.client;
+  }"""
+    new = """  Future<void> updateHeaders() async {
+    // 把 accessToken 一并交给 native 侧，让它写进 cookieJar。
+    //
+    // 原因：登录发生在 main isolate，而 remote-sync 等任务跑在独立 isolate；
+    // Dart 的 cookie 状态无法跨 isolate 共享。native 的 cookieJar 是进程级的，
+    // 任何 isolate 都能通过 requestAuthHeaders(url) 读到，所以必须在这里写入。
+    final token = Store.tryGet(StoreKey.accessToken);
+    await NetworkRepository.setHeaders(getRequestHeaders(), getServerUrls(), token: token);
+    _apiClient.client = NetworkRepository.client;
+  }"""
+    assert old in s, "api.service: 找不到 updateHeaders"
+    s = s.replace(old, new, 1)
+    p.write_text(s)
+    print("    api.service.dart: updateHeaders 传 token")
+PYEOF
+
 echo ""
 echo "==> 校验"
 grep -q "cronet_http" immich/mobile/pubspec.yaml && echo "  ✅ pubspec"
 grep -q "requestAuthHeaders" immich/mobile/pigeon/network_api.dart && echo "  ✅ pigeon"
 grep -q "override fun requestAuthHeaders" immich/mobile/android/app/src/main/kotlin/app/alextran/immich/core/NetworkApiPlugin.kt && echo "  ✅ NetworkApiPlugin"
 grep -q "CronetClient" immich/mobile/lib/infrastructure/repositories/network.repository.dart && echo "  ✅ network.repository"
+grep -q "setHeaders(getRequestHeaders(), getServerUrls(), token:" immich/mobile/lib/services/api.service.dart && echo "  ✅ api.service(token 注入 native)"
 grep -q "getAuthHeaders" immich/mobile/android/app/src/main/kotlin/app/alextran/immich/core/HttpClientManager.kt && echo "  ✅ HttpClientManager(上游已有)"
 echo ""
 echo "==> 07 补丁完成"
