@@ -84,6 +84,18 @@ if "services/background_upload.service.dart" not in s:
         1,
     )
 
+# A2. 顺手清掉不再使用的 foreground_upload import
+#     （A 段把 foregroundUploadServiceProvider 换成了 backgroundUploadServiceProvider，
+#      这条 import 就成了死引用，dart analyze 会报 unused_import）
+if "foregroundUploadService" not in s.replace(
+    "import 'package:immich_mobile/services/foreground_upload.service.dart';", ""
+):
+    s = s.replace(
+        "import 'package:immich_mobile/services/foreground_upload.service.dart';\n",
+        "",
+        1,
+    )
+
 # ═══════════════════════════════════════════════════════
 # C. 时间预算：20 分钟 -> 55 分钟
 #    Android 侧 Kotlin 传的是 20，这里减 1 作为安全余量。
