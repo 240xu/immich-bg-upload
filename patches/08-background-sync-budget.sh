@@ -152,27 +152,26 @@ import pathlib
 p = pathlib.Path("immich/mobile/lib/domain/services/background_worker.service.dart")
 s = p.read_text()
 
-if "syncBudget:" in s and "willRetrySync" in s:
+if "syncBudget:" in s and "will resume on next background run" in s:
     print("    background_worker: 预算传递已存在")
 else:
     # C1. onAndroidUpload 算出同步预算
-    old1 = """  @override
-  Future<bool> onAndroidUpload(int? maxMinutes) async {
-    final hashTimeout = Duration(minutes: _isBackupEnabled ? 3 : 6);
-    final backupTimeout = maxMinutes != null ? Duration(minutes: maxMinutes - 1) : null;
-    await _optimizeDB();
+    #
+    # ⚠️ 不要锚定 backupTimeout 那一行 —— 补丁 02 会把它从
+    #      final backupTimeout = maxMinutes != null ? Duration(minutes: maxMinutes - 1) : null;
+    #    改成
+    #      final backupTimeout = Duration(minutes: maxMinutes ?? fallbackMinutes);
+    # 锚定它会因补丁执行顺序而匹配失败（CI #48 就栽在这里）。
+    # 改为锚定「await _optimizeDB(); + return _backgroundLoop(」，这段 00~07 都不碰。
+    marker = """    await _optimizeDB();
     return _backgroundLoop(
       hashTimeout: hashTimeout,
       backupTimeout: backupTimeout,
       debugLabel: 'Android background upload',
-    );
-  }"""
-    new1 = """  @override
-  Future<bool> onAndroidUpload(int? maxMinutes) async {
-    final hashTimeout = Duration(minutes: _isBackupEnabled ? 3 : 6);
-    final backupTimeout = maxMinutes != null ? Duration(minutes: maxMinutes - 1) : null;
-    // 同步预算：给总预算的一半，至少 5 分钟。
+    );"""
+    new_marker = """    // 同步预算：给总预算的一半，至少 5 分钟。
     // 剩余时间留给哈希 + 备份，避免同步吃光整个后台窗口。
+    // maxMinutes 为 null 时不设预算（沿用原行为，不额外限制）。
     final syncBudget = maxMinutes != null
         ? Duration(minutes: maxMinutes ~/ 2 < 5 ? 5 : maxMinutes ~/ 2)
         : null;
@@ -182,10 +181,9 @@ else:
       backupTimeout: backupTimeout,
       syncBudget: syncBudget,
       debugLabel: 'Android background upload',
-    );
-  }"""
-    assert old1 in s, "background_worker: 找不到 onAndroidUpload"
-    s = s.replace(old1, new1, 1)
+    );"""
+    assert marker in s, "background_worker: 找不到 _optimizeDB + _backgroundLoop 调用点"
+    s = s.replace(marker, new_marker, 1)
 
     # C2. _backgroundLoop 签名 + 传预算 + 未完成要重试
     old2 = """  Future<bool> _backgroundLoop({
