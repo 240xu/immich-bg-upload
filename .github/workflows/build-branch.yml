@@ -106,17 +106,20 @@ jobs:
           cd immich/mobile
           flutter pub get
 
-      - name: Align pub-cache lang level (background_downloader)
+      - name: Verify serialization plugin versions match
         run: |
           set -e
           cd immich/mobile
-          KOTLIN_VER=$(grep -E '^kotlin = "' android/gradle/libs.versions.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
-          echo "项目 Kotlin = $KOTLIN_VER"
+          PROJ=$(grep -E '^kotlin-serialization' android/gradle/libs.versions.toml | sed -E 's/.*version = "([^"]+)".*/\1/')
+          echo "project kotlin-serialization = $PROJ"
           shopt -s nullglob
           for bd in "$HOME"/.pub-cache/hosted/*/background_downloader-*/android/build.gradle; do
             [ -f "$bd" ] || continue
-            sed -i -E "s|(kotlin\.plugin\.serialization' version ')[0-9.]+(')|\1${KOTLIN_VER}\2|" "$bd"
-            echo "aligned $bd -> $KOTLIN_VER"
+            BD=$(grep -oE "kotlin\.plugin\.serialization' version '[0-9.]+'" "$bd" | head -1 | sed -E "s/.*'([0-9.]+)'/\1/")
+            echo "background_downloader wants = $BD ($bd)"
+            if [ "$PROJ" != "$BD" ]; then
+              echo "mismatch: project=$PROJ bd=$BD"
+            fi
           done
 
       - name: Codegen - pigeon
@@ -173,7 +176,18 @@ jobs:
         run: |
           set -e
           cd immich/mobile
-          flutter build apk --release --target-platform android-arm64
+          for attempt in 1 2 3; do
+            echo "=== build attempt $attempt ==="
+            if flutter build apk --release --target-platform android-arm64; then
+              echo "build ok"
+              exit 0
+            fi
+            echo "attempt $attempt failed, cleaning gradle caches for retry"
+            rm -rf build/app/outputs 2>/dev/null || true
+            sleep 15
+          done
+          echo "all attempts failed"
+          exit 1
 
       - name: Verify and collect
         env:
