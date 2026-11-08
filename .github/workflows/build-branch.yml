@@ -211,3 +211,20 @@ jobs:
           name: apk-${{ inputs.branch }}
           path: out/
           retention-days: 30
+
+      - name: Publish to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SRC_BRANCH: ${{ inputs.branch }}
+        run: |
+          set -e
+          SAFE=$(echo "$SRC_BRANCH" | tr '/' '-')
+          TAG="build-${SAFE}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/*.apk out/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "Immich PR999 ${SRC_BRANCH}" \
+              --notes "Built from ${SRC_BRANCH}" \
+              out/*.apk out/SHA256SUMS
+          fi
