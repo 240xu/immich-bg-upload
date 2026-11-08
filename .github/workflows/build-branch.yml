@@ -1,0 +1,188 @@
+name: Build APK from branch (PR verification)
+
+# 目的：直接从某个分支构建，用来在「PR 的真实基线」上验证代码。
+# 与 build.yml 的区别：build.yml 是「官方 tag + 套 patches 脚本」，
+# 这个 workflow 是「直接 clone 分支」，分支里已经含全部改动，不再套补丁。
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: '分支或 tag（tag 更可复现）'
+        required: true
+        default: 'verify-bg-upload-20261108'
+      repo:
+        description: '源仓库 (owner/repo)'
+        required: true
+        default: '240xu/immich'
+      flutter_version:
+        description: 'Flutter 版本 (留空=从 pubspec 的 environment.flutter 读取)'
+        required: false
+        default: ''
+
+env:
+  PR_NUMBER: '999'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout build repo
+        uses: actions/checkout@v4
+
+      - name: Checkout source branch
+        env:
+          SRC_REPO: ${{ inputs.repo }}
+          SRC_BRANCH: ${{ inputs.branch }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          echo "Building $SRC_REPO@$SRC_BRANCH"
+          git clone --depth 50 "https://github.com/${SRC_REPO}.git" immich
+          cd immich
+          git fetch --depth 50 origin "$SRC_BRANCH"
+          git checkout -B "$SRC_BRANCH" "origin/$SRC_BRANCH"
+          echo "HEAD: $(git log -1 --oneline)"
+          echo "BASE: $(git log -1 --oneline HEAD~1 2>/dev/null || echo '(single commit)')"
+
+      - name: Resolve Flutter version
+        id: fl
+        env:
+          INPUT_FL: ${{ inputs.flutter_version }}
+        run: |
+          set -e
+          if [ -n "${INPUT_FL:-}" ]; then
+            V="$INPUT_FL"
+            echo "手动指定: $V"
+          else
+            V=$(sed -n '/^environment:/,/^$/p' immich/mobile/pubspec.yaml \
+                | grep -E '^\s+flutter:' | head -1 | sed -E 's/.*flutter:\s*//' | tr -d '"'"'"' ')
+          fi
+          if [ -z "${V:-}" ]; then
+            echo "::error::无法确定 Flutter 版本"
+            exit 1
+          fi
+          echo "使用 Flutter $V"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ steps.fl.outputs.version }}
+          channel: stable
+          cache: true
+
+      - name: Generate OpenAPI Dart SDK
+        run: |
+          set -e
+          cd immich
+          npm install -g @openapitools/openapi-generator-cli
+          cd open-api
+          bash ./bin/generate-dart-sdk.sh
+
+      - name: pub get
+        run: |
+          set -e
+          cd immich/mobile
+          flutter pub get
+
+      - name: Align pub-cache lang level (background_downloader)
+        run: |
+          set -e
+          cd immich/mobile
+          KOTLIN_VER=$(grep -E '^kotlin = "' android/gradle/libs.versions.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "项目 Kotlin = $KOTLIN_VER"
+          shopt -s nullglob
+          for bd in "$HOME"/.pub-cache/hosted/*/background_downloader-*/android/build.gradle; do
+            [ -f "$bd" ] || continue
+            sed -i -E "s|(kotlin\.plugin\.serialization' version ')[0-9.]+(')|\1${KOTLIN_VER}\2|" "$bd"
+            echo "aligned $bd -> $KOTLIN_VER"
+          done
+
+      - name: Codegen - pigeon
+        run: |
+          set -e
+          cd immich/mobile
+          ls pigeon/*.dart | xargs -n1 -P4 -I{} dart run pigeon --input {}
+          dart format lib/platform/
+
+      - name: Codegen - drift migrations
+        run: |
+          set -e
+          cd immich/mobile
+          dart run drift_dev make-migrations
+
+      - name: Codegen - i18n
+        run: |
+          set -e
+          cd immich/mobile
+          dart run easy_localization:generate -S ../i18n
+          dart format lib/generated/codegen_loader.g.dart
+          dart run bin/generate_keys.dart
+          dart format lib/generated/translations.g.dart
+
+      - name: Codegen - build_runner
+        run: |
+          set -e
+          cd immich/mobile
+          dart run build_runner build --delete-conflicting-outputs
+          dart format lib/routing/router.gr.dart
+
+      - name: Restore signing keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.IMMICH_KEYSTORE_B64 }}
+          STORE_PASS: ${{ secrets.IMMICH_KEYSTORE_PASS }}
+          KEY_ALIAS: ${{ secrets.IMMICH_KEY_ALIAS }}
+        run: |
+          set -e
+          if [ -z "${KEYSTORE_B64:-}" ]; then
+            echo "::error::缺少 secret IMMICH_KEYSTORE_B64"
+            exit 1
+          fi
+          cd immich/mobile/android
+          echo "$KEYSTORE_B64" | base64 -d > key.jks
+          chmod 600 key.jks
+          keytool -list -keystore key.jks -storepass "$STORE_PASS" -alias "$KEY_ALIAS" \
+            | grep -E "Alias|Entry type" || true
+
+      - name: Build APK
+        env:
+          ALIAS: ${{ secrets.IMMICH_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.IMMICH_KEYSTORE_PASS }}
+          ANDROID_STORE_PASSWORD: ${{ secrets.IMMICH_KEYSTORE_PASS }}
+        run: |
+          set -e
+          cd immich/mobile
+          flutter build apk --release --target-platform android-arm64
+
+      - name: Verify and collect
+        env:
+          SRC_BRANCH: ${{ inputs.branch }}
+        run: |
+          set -e
+          APK=$(ls immich/mobile/build/app/outputs/flutter-apk/*.apk | head -1)
+          ls -lh "$APK"
+          APKSIGNER=$(find "$ANDROID_HOME" -name apksigner -type f 2>/dev/null | sort -V | tail -1)
+          [ -n "$APKSIGNER" ] && "$APKSIGNER" verify --print-certs "$APK" | head -12 || true
+          AAPT=$(find "$ANDROID_HOME" -name aapt -type f 2>/dev/null | sort -V | tail -1)
+          [ -n "$AAPT" ] && "$AAPT" dump badging "$APK" | grep -E "^package:" || true
+          mkdir -p out
+          SAFE=$(echo "$SRC_BRANCH" | tr '/' '-')
+          cp "$APK" "out/immich-pr999-${SAFE}.apk"
+          cd out && sha256sum *.apk > SHA256SUMS && cat SHA256SUMS
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ inputs.branch }}
+          path: out/
+          retention-days: 30
