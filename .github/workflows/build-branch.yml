@@ -36,17 +36,22 @@ jobs:
       - name: Checkout source branch
         env:
           SRC_REPO: ${{ inputs.repo }}
-          SRC_BRANCH: ${{ inputs.branch }}
+          SRC_REF: ${{ inputs.branch }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          echo "Building $SRC_REPO@$SRC_BRANCH"
+          echo "Building $SRC_REPO@$SRC_REF"
           git clone --depth 50 "https://github.com/${SRC_REPO}.git" immich
           cd immich
-          git fetch --depth 50 origin "$SRC_BRANCH"
-          git checkout -B "$SRC_BRANCH" "origin/$SRC_BRANCH"
+          git fetch --depth 50 origin "$SRC_REF"
+          if git rev-parse --verify "refs/remotes/origin/$SRC_REF" >/dev/null 2>&1; then
+            echo "resolving as branch"
+            git checkout -B build-target "origin/$SRC_REF"
+          else
+            echo "resolving as tag/ref"
+            git checkout -B build-target FETCH_HEAD
+          fi
           echo "HEAD: $(git log -1 --oneline)"
-          echo "BASE: $(git log -1 --oneline HEAD~1 2>/dev/null || echo '(single commit)')"
 
       - name: Resolve Flutter version
         id: fl
