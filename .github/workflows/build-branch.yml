@@ -178,7 +178,10 @@ jobs:
           cd immich/mobile
           for attempt in 1 2 3; do
             echo "=== build attempt $attempt ==="
-            if flutter build apk --release --target-platform android-arm64; then
+            # cronetHttpNoPlay=true 让 cronet_http 依赖 app-packaged 的 cronet-embedded，
+            # 而不是 Play Services 的 Cronet —— 后量子 TLS（X25519MLKEM768）只在内嵌 143 里保证。
+            if flutter build apk --release --target-platform android-arm64 \
+                 --dart-define=cronetHttpNoPlay=true; then
               echo "build ok"
               exit 0
             fi
