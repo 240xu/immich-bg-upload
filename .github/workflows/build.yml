@@ -7,6 +7,11 @@ on:
         description: 'Immich version tag (留空=自动取最新 stable)'
         required: false
         default: ''
+      dry_run:
+        description: '只编译验证，不发布 release、不写 .built-versions（用于上游发版前预验证）'
+        type: boolean
+        required: false
+        default: false
   push:
     branches: [main]
     paths:
@@ -253,6 +258,7 @@ jobs:
 
       # 发布到 Release，便于用镜像站加速下载
       - name: Publish to Release
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMMICH_VERSION: ${{ needs.resolve.outputs.version }}
@@ -278,7 +284,7 @@ jobs:
 
       # 记录已构建版本，避免定时任务重复构建
       - name: Mark version as built
-        if: success()
+        if: ${{ success() && !inputs.dry_run }}
         env:
           IMMICH_VERSION: ${{ needs.resolve.outputs.version }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
