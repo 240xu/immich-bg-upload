@@ -94,18 +94,27 @@ NEW = '''  /// Enqueues backup candidates and waits until the background queue d
   /// a meaningful result back to WorkManager so it can schedule a retry.
   ///
   /// Returns `true` only when every queued task finished successfully.
+  ///
+  /// [onUploadCompleted] 每成功完成一个上传就调用一次，用于让调用方
+  /// 在中途做阶段性工作（如上游 PR #33162 的「每 10 个补一次同步相册」）。
+  /// 回调是同步的，不要在里面 await；需要异步工作请自行起 Future 存起来。
   Future<bool> uploadBackupCandidatesAndWait(
     String userId, {
     Completer<void>? cancellationToken,
     Duration timeout = const Duration(minutes: 55),
     Duration pollInterval = const Duration(seconds: 2),
+    void Function(int completed)? onUploadCompleted,
   }) async {
     var failed = 0;
+    var completed = 0;
     // Count failures through the callback hook so nothing emitted during
     // [uploadBackupCandidates] is missed.
     _statusObserver = (update) {
       if (update.status == TaskStatus.failed) {
         failed++;
+      } else if (update.status == TaskStatus.complete) {
+        completed++;
+        onUploadCompleted?.call(completed);
       }
     };
 
@@ -178,6 +187,8 @@ checks = [
     ("方法定义", "Future<bool> uploadBackupCandidatesAndWait(" in s),
     ("_awaitQueueDrain 抽出", "Future<bool> _awaitQueueDrain({" in s),
     ("局部失败计数", "var failed = 0;" in s),
+    ("进度回调 onUploadCompleted", "void Function(int completed)? onUploadCompleted," in s),
+    ("完成计数上报", "onUploadCompleted?.call(completed);" in s),
     ("钩子在 finally 清理", "_statusObserver = null;" in s),
     # 注意：resume() 里那一行 _uploadRepository.start() 是上游本来就有的，
     # 不能一棍子打死。要判的是「我们的等待方法里没有多叫一次 start()」。

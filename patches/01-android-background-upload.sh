@@ -106,8 +106,35 @@ OLD_V2 = """      final uploadService = _ref?.read(foregroundUploadServiceProvid
       // Retry when at least one upload failed
       return failed > 0;"""
 
-NEW_V2 = _NEW_CORE + """      // 上游 PR #33162：把本轮上传的资产补进「同步相册」。
-      // 走 BackgroundUploadService 时拿不到逐个 onSuccess，改为结束后统一补一次。
+NEW_V2 = """      // Android 也走 BackgroundUploadService：底层 background_downloader
+      // 在 Android 上是 WorkManager + 前台服务（常驻通知），
+      // App 退到后台后不会被 lifecycle 取消。
+      final bgUpload = _ref?.read(backgroundUploadServiceProvider);
+      if (bgUpload == null) {
+        _logger.warning("backgroundUploadService unavailable, skipping backup");
+        return false;
+      }
+      // 上游 PR #33162：把本轮上传的资产补进「同步相册」。
+      // 走 BackgroundUploadService 时拿不到逐个 onSuccess，改用 onUploadCompleted
+      // 复刻上游「每 10 个补一次」的语义 —— 这样即使本轮被 Android 中途杀掉，
+      // 已传完的那批也不会漏出相册（上游正是为此而不只在结束时补一次）。
+      var unlinked = 0;
+      Future<void>? albumSync;
+      final allSucceeded = await bgUpload.uploadBackupCandidatesAndWait(
+        currentUser.id,
+        cancellationToken: _cancellationToken,
+        onUploadCompleted: (_) {
+          unlinked += 1;
+          // 同时只跑一个相册同步，避免和上传抢资源
+          if (unlinked >= 10 && albumSync == null) {
+            unlinked = 0;
+            albumSync = _syncLinkedAlbums(currentUser.id).whenComplete(() => albumSync = null);
+          }
+        },
+      );
+      await albumSync;
+      _logger.info("Background backup finished, all uploads succeeded: $allSucceeded");
+      // 结束时再补一次，收尾不满 10 个的尾巴
       await _syncLinkedAlbums(currentUser.id);
       // Retry when at least one upload failed
       return !allSucceeded;"""

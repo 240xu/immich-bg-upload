@@ -91,6 +91,16 @@ jobs:
             https://github.com/immich-app/immich.git immich
           cd immich && git log -1 --oneline
 
+      - name: Install native build deps
+        run: |
+          set -e
+          # 上游新增 Rust native_core（rav1d 解码器），其 build.rs 需要 nasm：
+          #   cargo:warning=Unable to run nasm: No such file or directory
+          #   NASM build failed. Make sure you have nasm installed
+          # 缺了就卡在 "Running build hooks"，与我们的补丁无关。
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nasm
+
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
