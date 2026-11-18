@@ -92,10 +92,29 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      - name: Resolve Flutter version from upstream pubspec
+        id: flutter
+        env:
+          FALLBACK: ${{ env.FLUTTER_VERSION }}
+        run: |
+          set -e
+          # mobile/pubspec.yaml 的 environment.flutter 就是该版本官方用的 Flutter
+          V=$(grep -E '^\s+flutter:\s*[0-9]' immich/mobile/pubspec.yaml | head -1 \
+              | sed -E 's/.*flutter:\s*//; s/[^0-9.].*//')
+          if [ -z "${V:-}" ]; then
+            echo "未能解析上游 Flutter 版本，回退到 $FALLBACK"
+            V="$FALLBACK"
+          fi
+          echo "Flutter 版本 = $V"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
+          # 从上游 pubspec.yaml 读取该版本要求的 Flutter，不再写死。
+          # 写死会在上游升级时直接卡在 pub get（例：v3.4.1 要 3.47.2，
+          # 11-18 的 main 已要 3.47.9）。env.FLUTTER_VERSION 仅作兜底。
+          flutter-version: ${{ steps.flutter.outputs.version }}
           channel: stable
           cache: true
 

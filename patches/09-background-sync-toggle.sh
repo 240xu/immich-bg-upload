@@ -282,6 +282,30 @@ else:
 
 """
     s = s.replace(old3, getter + old3, 1)
+
+    # 上游 v3.4.1 之后（PR #33162）新增 _syncLinkedAlbums，它内部也会调
+    # _remoteSyncService.sync()。若不放行开关，就会出现
+    # 「后台同步关掉了、后台仍在同步」的漏洞。只在方法存在时才打。
+    old4 = """  Future<void> _syncLinkedAlbums(String userId) async {
+    if (_cancellationToken.isCompleted || !SettingsRepository.instance.appConfig.backup.syncAlbums) {
+      return;
+    }
+"""
+    new4 = """  Future<void> _syncLinkedAlbums(String userId) async {
+    // 后台同步开关同样管住这里：本方法内部会跑 _remoteSyncService.sync()。
+    if (!_backgroundSyncEnabled) {
+      return;
+    }
+    if (_cancellationToken.isCompleted || !SettingsRepository.instance.appConfig.backup.syncAlbums) {
+      return;
+    }
+"""
+    if old4 in s:
+        s = s.replace(old4, new4, 1)
+        print("    worker: 后台同步开关已覆盖 _syncLinkedAlbums")
+    else:
+        print("    worker: 无 _syncLinkedAlbums（旧版上游），跳过")
+
     p.write_text(s)
     print("    worker: +开关判断 + getter")
 PYEOF

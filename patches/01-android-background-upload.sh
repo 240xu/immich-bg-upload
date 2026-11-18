@@ -43,19 +43,10 @@ bu = pathlib.Path("immich/mobile/lib/services/background_upload.service.dart")
 # ═══════════════════════════════════════════════════════
 s = worker.read_text()
 
-OLD = """      final uploadService = _ref?.read(foregroundUploadServiceProvider);
-      var failed = 0;
-      await uploadService?.uploadCandidates(
-        currentUser.id,
-        _cancellationToken,
-        callbacks: UploadCallbacks(onError: (_, _) => failed++),
-        useSequentialUpload: true,
-      );
-      _logger.info("Background backup finished, $failed uploads failed");
-      // Retry when at least one upload failed
-      return failed > 0;"""
-
-NEW = """      // Android 也走 BackgroundUploadService：底层 background_downloader
+# 上游在 v3.4.1 之后（PR #33162, 2026-11-18）给这个分支加了「同步相册」逻辑
+# （每 10 个上传补一次 + 结束时再补一次），原文块因此变了。
+# 这里同时准备两版锚点，匹配哪个用哪个 —— 上游再演进来只需再加一版。
+_NEW_CORE = """      // Android 也走 BackgroundUploadService：底层 background_downloader
       // 在 Android 上是 WorkManager + 前台服务（常驻通知），
       // App 退到后台后不会被 lifecycle 取消。
       final bgUpload = _ref?.read(backgroundUploadServiceProvider);
@@ -68,13 +59,73 @@ NEW = """      // Android 也走 BackgroundUploadService：底层 background_dow
         cancellationToken: _cancellationToken,
       );
       _logger.info("Background backup finished, all uploads succeeded: $allSucceeded");
+"""
+
+# ① 旧版（v3.4.1 及之前）：没有相册同步
+OLD_V1 = """      final uploadService = _ref?.read(foregroundUploadServiceProvider);
+      var failed = 0;
+      await uploadService?.uploadCandidates(
+        currentUser.id,
+        _cancellationToken,
+        callbacks: UploadCallbacks(onError: (_, _) => failed++),
+        useSequentialUpload: true,
+      );
+      _logger.info("Background backup finished, $failed uploads failed");
+      // Retry when at least one upload failed
+      return failed > 0;"""
+
+NEW_V1 = _NEW_CORE + """      // Retry when at least one upload failed
+      return !allSucceeded;"""
+
+# ② 新版（v3.4.1 之后）：带 _syncLinkedAlbums（PR #33162）
+#    走 BackgroundUploadService 后没有逐个 onSuccess 回调，改在结束时补一次 ——
+#    这正是上游「结束时再补一次」的那次，属于关键补偿而非降级。
+OLD_V2 = """      final uploadService = _ref?.read(foregroundUploadServiceProvider);
+      var failed = 0;
+      var unlinked = 0;
+      Future<void>? albumSync;
+      await uploadService?.uploadCandidates(
+        currentUser.id,
+        _cancellationToken,
+        callbacks: UploadCallbacks(
+          onSuccess: (_, _) {
+            unlinked += 1;
+            // Sync albums without blocking uploads, skip if one is already running
+            if (unlinked >= 10 && albumSync == null) {
+              unlinked = 0;
+              albumSync = _syncLinkedAlbums(currentUser.id).whenComplete(() => albumSync = null);
+            }
+          },
+          onError: (_, _) => failed += 1,
+        ),
+        useSequentialUpload: true,
+      );
+      await albumSync;
+      _logger.info("Background backup finished, $failed uploads failed");
+      await _syncLinkedAlbums(currentUser.id);
+      // Retry when at least one upload failed
+      return failed > 0;"""
+
+NEW_V2 = _NEW_CORE + """      // 上游 PR #33162：把本轮上传的资产补进「同步相册」。
+      // 走 BackgroundUploadService 时拿不到逐个 onSuccess，改为结束后统一补一次。
+      await _syncLinkedAlbums(currentUser.id);
       // Retry when at least one upload failed
       return !allSucceeded;"""
 
-if OLD not in s:
+VARIANT = None
+if OLD_V1 in s:
+    s = s.replace(OLD_V1, NEW_V1, 1)
+    VARIANT = "v3.4.1 及之前（无相册同步）"
+elif OLD_V2 in s:
+    s = s.replace(OLD_V2, NEW_V2, 1)
+    VARIANT = "v3.4.1 之后（含 PR #33162 相册同步）"
+else:
     print("ERROR: 找不到 _handleBackup 的 Android 分支原文", file=sys.stderr)
+    print("       已知锚点版本都不匹配 —— 上游可能又改了这个分支。", file=sys.stderr)
+    print("       请对照 mobile/lib/domain/services/background_worker.service.dart", file=sys.stderr)
+    print("       的 _handleBackup() 更新 OLD_Vn / NEW_Vn。", file=sys.stderr)
     sys.exit(1)
-s = s.replace(OLD, NEW, 1)
+print(f"    _handleBackup 锚点命中: {VARIANT}")
 
 if "services/background_upload.service.dart" not in s:
     s = s.replace(
