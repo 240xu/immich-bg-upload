@@ -193,6 +193,7 @@ jobs:
           exit 1
 
       - name: Verify and collect
+        id: collect
         env:
           SRC_BRANCH: ${{ inputs.branch }}
         run: |
@@ -204,16 +205,21 @@ jobs:
           AAPT=$(find "$ANDROID_HOME" -name aapt -type f 2>/dev/null | sort -V | tail -1)
           [ -n "$AAPT" ] && "$AAPT" dump badging "$APK" | grep -E "^package:" || true
           mkdir -p out
-          SAFE=$(echo "$SRC_BRANCH" | tr '/' '-')
+          # upload-artifact@v4 拒绝 artifact 名里出现 / : " < > | * ? \ 等字符。
+          # 分支名可能形如 rebase/v3.4.1，必须净化后才能当 artifact 名。
+          SAFE=$(echo "$SRC_BRANCH" | tr '/:"<>|*?\\' '-' | tr -d '\r\n')
           cp "$APK" "out/immich-pr999-${SAFE}.apk"
           cd out && sha256sum *.apk > SHA256SUMS && cat SHA256SUMS
+          echo "safe=${SAFE}" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: apk-${{ inputs.branch }}
+          name: apk-${{ steps.collect.outputs.safe }}
           path: out/
           retention-days: 30
+          overwrite: true
+          if-no-files-found: error
 
       - name: Publish to release
         env:
@@ -221,7 +227,7 @@ jobs:
           SRC_BRANCH: ${{ inputs.branch }}
         run: |
           set -e
-          SAFE=$(echo "$SRC_BRANCH" | tr '/' '-')
+          SAFE=$(echo "$SRC_BRANCH" | tr '/:"<>|*?\\' '-' | tr -d '\r\n')
           TAG="build-${SAFE}"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" out/*.apk out/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
