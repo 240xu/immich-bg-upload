@@ -18,6 +18,10 @@ on:
         description: 'Flutter 版本 (留空=从 pubspec 的 environment.flutter 读取)'
         required: false
         default: ''
+      test_path:
+        description: '只跑某个测试路径（留空=test 全量）'
+        required: false
+        default: ''
 
 env:
   PR_NUMBER: '999'
@@ -169,17 +173,21 @@ jobs:
           flutter analyze --no-fatal-warnings --no-fatal-infos 2>&1 | tail -40
 
       - name: Unit tests
+        env:
+          TEST_PATH: ${{ inputs.test_path }}
         run: |
           set -euo pipefail
           cd immich/mobile
+          TARGET="${TEST_PATH:-test}"
+          echo "flutter test $TARGET"
           # 注意：必须有 pipefail。之前 `flutter test | tail` 让管道吞掉了
           # 退出码，11 个用例失败仍然判成功，等于没测。
-          if flutter test --reporter expanded > /tmp/test.log 2>&1; then
-            tail -5 /tmp/test.log
+          if flutter test --reporter expanded "$TARGET" > /tmp/test.log 2>&1; then
+            tail -3 /tmp/test.log
           else
             echo "::error::单元测试失败，失败用例："
-            grep -E "\[E\]|Some tests failed|Expected:|Actual:" /tmp/test.log | head -80 || true
+            grep -n -A12 "\[E\]" /tmp/test.log | head -200 || true
             echo "---- 末尾 ----"
-            tail -40 /tmp/test.log
+            tail -20 /tmp/test.log
             exit 1
           fi
