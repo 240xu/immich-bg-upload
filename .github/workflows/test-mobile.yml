@@ -1,0 +1,185 @@
+name: Mobile analyze + unit tests
+
+# 目的：直接从某个分支构建，用来在「PR 的真实基线」上验证代码。
+# 与 build.yml 的区别：build.yml 是「官方 tag + 套 patches 脚本」，
+# 这个 workflow 是「直接 clone 分支」，分支里已经含全部改动，不再套补丁。
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: '分支或 tag（tag 更可复现）'
+        required: true
+        default: 'verify-bg-upload-20261108'
+      repo:
+        description: '源仓库 (owner/repo)'
+        required: true
+        default: '240xu/immich'
+      flutter_version:
+        description: 'Flutter 版本 (留空=从 pubspec 的 environment.flutter 读取)'
+        required: false
+        default: ''
+
+env:
+  PR_NUMBER: '999'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout build repo
+        uses: actions/checkout@v4
+
+      - name: Checkout source branch
+        env:
+          SRC_REPO: ${{ inputs.repo }}
+          SRC_REF: ${{ inputs.branch }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          echo "Building $SRC_REPO@$SRC_REF"
+          git clone --depth 50 "https://github.com/${SRC_REPO}.git" immich
+          cd immich
+          git fetch --depth 50 origin "$SRC_REF"
+          if git rev-parse --verify "refs/remotes/origin/$SRC_REF" >/dev/null 2>&1; then
+            echo "resolving as branch"
+            git checkout -B build-target "origin/$SRC_REF"
+          else
+            echo "resolving as tag/ref"
+            git checkout -B build-target FETCH_HEAD
+          fi
+          echo "HEAD: $(git log -1 --oneline)"
+
+      - name: Resolve Flutter version
+        id: fl
+        env:
+          INPUT_FL: ${{ inputs.flutter_version }}
+        run: |
+          set -e
+          if [ -n "${INPUT_FL:-}" ]; then
+            V="$INPUT_FL"
+            echo "手动指定: $V"
+          else
+            V=$(sed -n '/^environment:/,/^$/p' immich/mobile/pubspec.yaml \
+                | grep -E '^\s+flutter:' | head -1 | sed -E 's/.*flutter:\s*//' | tr -d '"'"'"' ')
+          fi
+          if [ -z "${V:-}" ]; then
+            echo "::error::无法确定 Flutter 版本"
+            exit 1
+          fi
+          echo "使用 Flutter $V"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install native build deps
+        run: |
+          set -e
+          # runner 的 apt 镜像偶尔会“Resource temporarily unavailable”，
+          # 之前因此整个构建失败过一次，这里重试几次。
+          ok=0
+          for i in 1 2 3 4; do
+            if sudo apt-get update -qq && sudo apt-get install -y -qq nasm clang cmake ninja-build pkg-config libgtk-3-dev; then
+              ok=1
+              break
+            fi
+            echo "::warning::apt-get 失败，15s 后重试 ($i/4)"
+            sleep 15
+          done
+          [ "$ok" = "1" ]
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ steps.fl.outputs.version }}
+          channel: stable
+          cache: true
+
+      - name: Generate OpenAPI Dart SDK
+        run: |
+          set -e
+          cd immich
+          npm install -g @openapitools/openapi-generator-cli
+          cd open-api
+          bash ./bin/generate-dart-sdk.sh
+
+      - name: pub get
+        run: |
+          set -e
+          cd immich/mobile
+          flutter pub get
+
+      - name: Verify serialization plugin versions match
+        run: |
+          set -e
+          cd immich/mobile
+          PROJ=$(grep -E '^kotlin-serialization' android/gradle/libs.versions.toml | sed -E 's/.*version = "([^"]+)".*/\1/')
+          echo "project kotlin-serialization = $PROJ"
+          shopt -s nullglob
+          for bd in "$HOME"/.pub-cache/hosted/*/background_downloader-*/android/build.gradle; do
+            [ -f "$bd" ] || continue
+            BD=$(grep -oE "kotlin\.plugin\.serialization' version '[0-9.]+'" "$bd" | head -1 | sed -E "s/.*'([0-9.]+)'/\1/")
+            echo "background_downloader wants = $BD ($bd)"
+            if [ "$PROJ" != "$BD" ]; then
+              echo "mismatch: project=$PROJ bd=$BD"
+            fi
+          done
+
+      - name: Codegen - pigeon
+        run: |
+          set -e
+          cd immich/mobile
+          ls pigeon/*.dart | xargs -n1 -P4 -I{} dart run pigeon --input {}
+          dart format lib/platform/
+
+      - name: Codegen - drift migrations
+        run: |
+          set -e
+          cd immich/mobile
+          dart run drift_dev make-migrations
+
+      - name: Codegen - i18n
+        run: |
+          set -e
+          cd immich/mobile
+          dart run easy_localization:generate -S ../i18n
+          dart format lib/generated/codegen_loader.g.dart
+          dart run bin/generate_keys.dart
+          dart format lib/generated/translations.g.dart
+
+      - name: Codegen - build_runner
+        run: |
+          set -e
+          cd immich/mobile
+          dart run build_runner build --delete-conflicting-outputs
+          dart format lib/routing/router.gr.dart
+
+      - name: Analyze
+        run: |
+          set -euo pipefail
+          cd immich/mobile
+          # 只把 error 当失败：上游本身带有一些 info/warning，不该挡住出包
+          flutter analyze --no-fatal-warnings --no-fatal-infos 2>&1 | tail -40
+
+      - name: Unit tests
+        run: |
+          set -euo pipefail
+          cd immich/mobile
+          # 注意：必须有 pipefail。之前 `flutter test | tail` 让管道吞掉了
+          # 退出码，11 个用例失败仍然判成功，等于没测。
+          if flutter test --reporter expanded > /tmp/test.log 2>&1; then
+            tail -5 /tmp/test.log
+          else
+            echo "::error::单元测试失败，失败用例："
+            grep -E "\[E\]|Some tests failed|Expected:|Actual:" /tmp/test.log | head -80 || true
+            echo "---- 末尾 ----"
+            tail -40 /tmp/test.log
+            exit 1
+          fi

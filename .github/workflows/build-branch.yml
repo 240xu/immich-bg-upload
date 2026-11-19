@@ -163,16 +163,26 @@ jobs:
 
       - name: Analyze
         run: |
-          set -e
+          set -euo pipefail
           cd immich/mobile
           # 只把 error 当失败：上游本身带有一些 info/warning，不该挡住出包
           flutter analyze --no-fatal-warnings --no-fatal-infos 2>&1 | tail -40
 
       - name: Unit tests
         run: |
-          set -e
+          set -euo pipefail
           cd immich/mobile
-          flutter test --reporter expanded 2>&1 | tail -80
+          # 注意：必须有 pipefail。之前 `flutter test | tail` 让管道吞掉了
+          # 退出码，11 个用例失败仍然判成功，等于没测。
+          if flutter test --reporter expanded > /tmp/test.log 2>&1; then
+            tail -5 /tmp/test.log
+          else
+            echo "::error::单元测试失败，失败用例："
+            grep -E "\[E\]|Some tests failed|Expected:|Actual:" /tmp/test.log | head -80 || true
+            echo "---- 末尾 ----"
+            tail -40 /tmp/test.log
+            exit 1
+          fi
 
       - name: Restore signing keystore
         env:
