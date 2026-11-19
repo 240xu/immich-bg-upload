@@ -151,6 +151,19 @@ jobs:
           dart run build_runner build --delete-conflicting-outputs
           dart format lib/routing/router.gr.dart
 
+      - name: Analyze
+        run: |
+          set -e
+          cd immich/mobile
+          # 只把 error 当失败：上游本身带有一些 info/warning，不该挡住出包
+          flutter analyze --no-fatal-warnings --no-fatal-infos 2>&1 | tail -40
+
+      - name: Unit tests
+        run: |
+          set -e
+          cd immich/mobile
+          flutter test --reporter expanded 2>&1 | tail -80
+
       - name: Restore signing keystore
         env:
           KEYSTORE_B64: ${{ secrets.IMMICH_KEYSTORE_B64 }}
